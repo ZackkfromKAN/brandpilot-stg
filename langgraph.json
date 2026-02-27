@@ -1,0 +1,17 @@
+{
+  "dependencies": [
+    "langgraph",
+    "langgraph-cli[inmem]",
+    "langchain_openai",
+    "langsmith",
+    "pydantic",
+    "jsonschema",
+    "python-dotenv",
+    "requests",
+    "./app"
+  ],
+  "graphs": {
+    "brandpilot_innovation": "./app/agent.py:agent"
+  },
+  "env": "./.env"
+}
