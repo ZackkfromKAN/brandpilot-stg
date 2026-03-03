@@ -11,6 +11,8 @@ from jsonschema import Draft202012Validator
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, START, END
 from pydantic import BaseModel, Field
+from datetime import datetime, timezone
+from langchain_core.runnables import RunnableConfig
 
 load_dotenv()
 
@@ -50,6 +52,10 @@ class RunOutput(BaseModel):
 class GraphState(RunInput):
     step_outputs: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
     final: Optional[RunOutput] = None
+    response: Optional[Dict[str, Any]] = None
+    started_at: Optional[str] = None
+    ended_at: Optional[str] = None
+    duration_s: Optional[float] = None
 
 
 OUTPUT_SCHEMA = {
@@ -98,6 +104,41 @@ def _render_system_context(state: GraphState) -> str:
     if a.moka_json:
         parts += ["### moka_selected", json.dumps(a.moka_json, ensure_ascii=False)]
     return "\n\n".join(parts).strip()
+
+def _iso_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+def _get_runtime_ids(config: Optional[RunnableConfig]) -> Dict[str, Optional[str]]:
+    cfg = (config or {}).get("configurable", {}) if isinstance(config, dict) else {}
+    return {
+        "thread_id": cfg.get("thread_id"),
+        "run_id": cfg.get("run_id"),
+        "user_id": cfg.get("user_id") or cfg.get("langgraph_auth_user_id"),
+    }
+
+def _build_compact_response(state: GraphState, team: str, model_used: str, config: Optional[RunnableConfig]) -> Dict[str, Any]:
+    ids = _get_runtime_ids(config)
+    persona_id = None
+    try:
+        persona_id = (state.persona or {}).get("id")
+    except Exception:
+        persona_id = None
+
+    # Only the step outputs; no persona/brand/assets echo
+    outputs = dict(state.step_outputs or {})
+
+    return {
+        "persona_id": persona_id,
+        "thread_id": ids.get("thread_id"),
+        "run_id": ids.get("run_id"),
+        "status": "completed",  # run failed => server will still show error
+        "team": team,
+        "model": model_used,
+        "started_at": state.started_at,
+        "ended_at": state.ended_at,
+        "duration_s": state.duration_s,
+        "outputs": outputs,
+    }
 
 
 def _extract_hub_system_template(pulled_prompt: Any) -> str:
@@ -211,7 +252,7 @@ def _call_llm(state: GraphState, team_system_prompt: str, team: TeamName) -> Dic
     return _best_effort_json_parse(content)
 
 
-def _run_team_step(state_in: Any, team: TeamName) -> Dict[str, Any]:
+def _run_team_step(state: Any, team: TeamName, config: Optional[RunnableConfig] = None) -> Dict[str, Any]:
     state = _as_state(state_in)
 
     prompt_name = f"brandpilot_innovation_{team}"
@@ -238,28 +279,50 @@ def _run_team_step(state_in: Any, team: TeamName) -> Dict[str, Any]:
 
     out = _validate_output(raw)
 
+    # timing
+    started_at = state.started_at or _iso_now()
+    ended_at = _iso_now()
+
+    # duration
+    try:
+        t0 = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+        t1 = datetime.fromisoformat(ended_at.replace("Z", "+00:00"))
+        duration_s = (t1 - t0).total_seconds()
+    except Exception:
+        duration_s = None
+
     step_outputs = dict(state.step_outputs)
     step_outputs[team] = out.output
+
+    # Build compact payload for n8n
+    compact = _build_compact_response(
+        GraphState(**{**state.model_dump(), "step_outputs": step_outputs, "started_at": started_at, "ended_at": ended_at, "duration_s": duration_s}),
+        team=str(team),
+        model_used=state.model,
+        config=config,
+    )
 
     return {
         "step_outputs": step_outputs,
         "final": out.model_dump(),
+        "started_at": started_at,
+        "ended_at": ended_at,
+        "duration_s": duration_s,
+        "response": compact,
     }
 
-
-def run_single(state: Any) -> Dict[str, Any]:
+def run_single(state: Any, config: RunnableConfig) -> Dict[str, Any]:
     s = _as_state(state)
-    return _run_team_step(s, s.team)
+    return _run_team_step(s, s.team, config=config)
 
 
-def run_recipe(state: Any) -> Dict[str, Any]:
+def run_recipe(state: Any, config: RunnableConfig) -> Dict[str, Any]:
     s = _as_state(state)
     updates: Dict[str, Any] = {}
-    # Replay sequentially, carrying forward updates via local state object
     for t in (s.recipe or []):
         merged = s.model_dump()
-        merged.update(updates)  # apply last updates
-        updates = _run_team_step(merged, t)
+        merged.update(updates)
+        updates = _run_team_step(merged, t, config=config)
     return updates
 
 
