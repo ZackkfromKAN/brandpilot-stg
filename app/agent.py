@@ -12,7 +12,7 @@ from jsonschema import Draft202012Validator
 from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, START, END
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 try:
     from zoneinfo import ZoneInfo  # py3.9+
@@ -84,18 +84,14 @@ class RunInput(BaseModel):
 
 
 class GraphState(RunInput):
-    # Internal (not returned)
-    step_outputs: Dict[str, Dict[str, Any]] = Field(default_factory=dict, exclude=True)
-    _best_model: str = Field(default="", exclude=True)
-    _assistant_id: str = Field(default="brandpilot_innovation", exclude=True)
+    # Private attrs (NOT pydantic fields)
+    _step_outputs: Dict[str, Dict[str, Any]] = PrivateAttr(default_factory=dict)
+    _best_model: str = PrivateAttr(default="")
+    _assistant_id: str = PrivateAttr(default="brandpilot_innovation")
 
     # =========================
     # OUTPUT FIELDS (IN ORDER)
     # =========================
-
-    # - brand (brand name)  -> inherited
-    # - account (company name) -> inherited
-
     persona_id: str = ""
     thread_id: str = ""
     run_id: str = ""
@@ -107,7 +103,7 @@ class GraphState(RunInput):
     model: str = ""  # most advanced model used
     datum: str = ""
 
-    # q1,a1..q10,a10 (lowercase required by user)
+    # q1,a1..q10,a10
     q1: str = ""
     a1: str = ""
     q2: str = ""
@@ -253,13 +249,16 @@ def _render_system_context(state: GraphState) -> str:
 
 
 def _get_runtime_ids(config: Optional[RunnableConfig]) -> Dict[str, str]:
+    # In LangGraph Cloud, thread/run IDs are usually in config["configurable"]
     cfg: Dict[str, Any] = {}
     if isinstance(config, dict):
-        cfg = (config.get("configurable") or {}) if isinstance(config.get("configurable"), dict) else {}
+        c = config.get("configurable")
+        if isinstance(c, dict):
+            cfg = c
     return {
         "thread_id": str(cfg.get("thread_id") or ""),
         "run_id": str(cfg.get("run_id") or ""),
-        "assistant_id": str(cfg.get("assistant_id") or ""),  # may be empty; we fallback
+        "assistant_id": str(cfg.get("assistant_id") or ""),
     }
 
 
@@ -338,7 +337,7 @@ def _call_llm(state: GraphState, team_system_prompt: str, team: TeamName, model_
         "team": team,
         "persona": state.persona,
         "extra_input": state.extra_input,
-        "previous": state.step_outputs,  # keep continuity for chained steps
+        "previous": state._step_outputs,  # continuity
         "output_template_version": state.output_template_version,
     }
     resp = llm.invoke(
@@ -385,7 +384,6 @@ def _track_best_model(state: GraphState, model_name: str) -> None:
 
 
 def _merge_interview(out: Dict[str, Any], state: GraphState) -> None:
-    # accept Q1..Q10 and/or q1..q10, and A1..A10 and/or a1..a10
     for i in range(1, 11):
         for key in (f"Q{i}", f"q{i}"):
             v = out.get(key)
@@ -433,14 +431,13 @@ def _merge_journey(out: Dict[str, Any], state: GraphState) -> None:
 
 
 def _merge_sketches(out: Dict[str, Any], state: GraphState) -> None:
-    # accept visual1..visual10 (lowercase)
     for i in range(1, 11):
         v = out.get(f"visual{i}")
         if isinstance(v, str):
             setattr(state, f"visual{i}", v)
 
 
-def _apply_step(team: TeamName, state: GraphState, config: Optional[RunnableConfig]) -> None:
+def _apply_step(team: TeamName, state: GraphState) -> None:
     prompt_name = f"brandpilot_innovation_{team}"
     team_system_prompt, hub_meta = _get_prompt_text(prompt_name)
 
@@ -454,8 +451,7 @@ def _apply_step(team: TeamName, state: GraphState, config: Optional[RunnableConf
     if not isinstance(output, dict):
         output = {}
 
-    # save raw step output for chaining
-    state.step_outputs[str(team)] = output
+    state._step_outputs[str(team)] = output
 
     if team == "interview":
         _merge_interview(output, state)
@@ -476,25 +472,21 @@ def _finalize_state(state: GraphState, config: Optional[RunnableConfig]) -> None
     state.thread_id = ids.get("thread_id", "")
     state.run_id = ids.get("run_id", "")
 
-    # assistant id (team output)
     assistant_id = ids.get("assistant_id", "").strip()
     if assistant_id:
         state._assistant_id = assistant_id
     state.team = state._assistant_id
 
-    # persona_id + datum
     if isinstance(state.persona, dict):
         state.persona_id = str(state.persona.get("id") or state.persona_id or "")
         d = state.persona.get("datum") or state.persona.get("date") or ""
         state.datum = str(d) if d is not None else state.datum
 
-    # timestamps in Brussels
     if not state.started_at:
         state.started_at = _tz_now_iso(BRUSSELS_TZ)
     if not state.ended_at:
         state.ended_at = _tz_now_iso(BRUSSELS_TZ)
 
-    # duration
     try:
         t0 = datetime.fromisoformat(state.started_at.replace("Z", "+00:00"))
         t1 = datetime.fromisoformat(state.ended_at.replace("Z", "+00:00"))
@@ -503,15 +495,12 @@ def _finalize_state(state: GraphState, config: Optional[RunnableConfig]) -> None
         state.duration_s = float(state.duration_s or 0.0)
 
     state.status = "completed"
-
-    # model (most advanced used)
     state.model = state._best_model or state.default_model
 
 
 def run_graph(state_in: Any, config: Optional[RunnableConfig] = None) -> Dict[str, Any]:
     state = _as_state(state_in)
 
-    # start time immediately
     if not state.started_at:
         state.started_at = _tz_now_iso(BRUSSELS_TZ)
 
@@ -523,14 +512,12 @@ def run_graph(state_in: Any, config: Optional[RunnableConfig] = None) -> Dict[st
             raise ValueError("Missing 'recipe' and missing 'step'")
         steps = [state.step]
 
-    # run in the user-provided order
     for t in steps:
-        _apply_step(t, state, config=config)
+        _apply_step(t, state)
 
     state.ended_at = _tz_now_iso(BRUSSELS_TZ)
     _finalize_state(state, config=config)
 
-    # return only the required output fields (order preserved by model field order)
     return state.model_dump(exclude_none=False)
 
 
