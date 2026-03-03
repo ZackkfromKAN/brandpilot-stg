@@ -22,7 +22,6 @@ except Exception:  # pragma: no cover
 load_dotenv()
 
 TeamName = Literal["interview", "jtbd", "current", "ideal", "features", "sketches"]
-
 BRUSSELS_TZ = "Europe/Brussels"
 
 
@@ -32,14 +31,7 @@ def _tz_now_iso(tz_name: str) -> str:
     return datetime.now(ZoneInfo(tz_name)).isoformat()
 
 
-def _to_tz_iso(dt: datetime, tz_name: str) -> str:
-    if ZoneInfo is None:
-        return dt.astimezone(timezone.utc).isoformat()
-    return dt.astimezone(ZoneInfo(tz_name)).isoformat()
-
-
 def _model_rank(name: str) -> int:
-    # tweak if you use other models
     ranks = {
         "gpt-5.2": 300,
         "gpt-5": 290,
@@ -70,32 +62,40 @@ class Assets(BaseModel):
 
 
 class RunInput(BaseModel):
-    # returned
+    # user input we DO want to return
     brand: str
     account: str = ""
 
-    # needed for prompting, excluded from API output
+    # user input we DO NOT want to echo back
     persona: Dict[str, Any] = Field(exclude=True)
     assets: Assets = Field(default_factory=Assets, exclude=True)
     recipe: Optional[List[TeamName]] = Field(default=None, exclude=True)
-
-    # single-step routing only, excluded from API output
     step: Optional[TeamName] = Field(default=None, exclude=True)
-
-    # optional per-step model map, excluded from API output
-    models: Optional[Dict[str, str]] = Field(default=None, exclude=True)
-
-    # prompt payload fields, excluded from API output
+    models: Optional[Dict[str, str]] = Field(default=None, exclude=True)  # per-step override
     extra_input: Optional[str] = Field(default=None, exclude=True)
     output_template_version: str = Field(default="v1", exclude=True)
     prompt_tag: str = Field(default="active", exclude=True)
 
     # default model for steps not in `models`
-    model: str = Field(default_factory=lambda: os.getenv("OPENAI_MODEL", "gpt-5.2"), exclude=True)
+    default_model: str = Field(
+        default_factory=lambda: os.getenv("OPENAI_MODEL", "gpt-5.2"),
+        exclude=True,
+    )
 
 
 class GraphState(RunInput):
-    # ids/timing returned
+    # Internal (not returned)
+    step_outputs: Dict[str, Dict[str, Any]] = Field(default_factory=dict, exclude=True)
+    _best_model: str = Field(default="", exclude=True)
+    _assistant_id: str = Field(default="brandpilot_innovation", exclude=True)
+
+    # =========================
+    # OUTPUT FIELDS (IN ORDER)
+    # =========================
+
+    # - brand (brand name)  -> inherited
+    # - account (company name) -> inherited
+
     persona_id: str = ""
     thread_id: str = ""
     run_id: str = ""
@@ -104,32 +104,32 @@ class GraphState(RunInput):
     duration_s: float = 0.0
     status: str = ""
     team: str = ""  # assistant_id
-    model_used: str = ""  # most advanced used across steps
+    model: str = ""  # most advanced model used
     datum: str = ""
 
-    # interview
-    Q1: str = ""
-    A1: str = ""
-    Q2: str = ""
-    A2: str = ""
-    Q3: str = ""
-    A3: str = ""
-    Q4: str = ""
-    A4: str = ""
-    Q5: str = ""
-    A5: str = ""
-    Q6: str = ""
-    A6: str = ""
-    Q7: str = ""
-    A7: str = ""
-    Q8: str = ""
-    A8: str = ""
-    Q9: str = ""
-    A9: str = ""
-    Q10: str = ""
-    A10: str = ""
+    # q1,a1..q10,a10 (lowercase required by user)
+    q1: str = ""
+    a1: str = ""
+    q2: str = ""
+    a2: str = ""
+    q3: str = ""
+    a3: str = ""
+    q4: str = ""
+    a4: str = ""
+    q5: str = ""
+    a5: str = ""
+    q6: str = ""
+    a6: str = ""
+    q7: str = ""
+    a7: str = ""
+    q8: str = ""
+    a8: str = ""
+    q9: str = ""
+    a9: str = ""
+    q10: str = ""
+    a10: str = ""
 
-    # jtbd
+    # job1..job10
     job1: str = ""
     job2: str = ""
     job3: str = ""
@@ -141,6 +141,7 @@ class GraphState(RunInput):
     job9: str = ""
     job10: str = ""
 
+    # pain1..pain10
     pain1: str = ""
     pain2: str = ""
     pain3: str = ""
@@ -152,6 +153,7 @@ class GraphState(RunInput):
     pain9: str = ""
     pain10: str = ""
 
+    # gain1..gain10
     gain1: str = ""
     gain2: str = ""
     gain3: str = ""
@@ -163,7 +165,7 @@ class GraphState(RunInput):
     gain9: str = ""
     gain10: str = ""
 
-    # features
+    # feature1..feature10
     feature1: str = ""
     feature2: str = ""
     feature3: str = ""
@@ -175,7 +177,7 @@ class GraphState(RunInput):
     feature9: str = ""
     feature10: str = ""
 
-    # journey (prefer ideal; fallback current)
+    # title, journey, step1..step10
     title: str = ""
     journey: str = ""
     step1: str = ""
@@ -188,6 +190,18 @@ class GraphState(RunInput):
     step8: str = ""
     step9: str = ""
     step10: str = ""
+
+    # visual1..visual10
+    visual1: str = ""
+    visual2: str = ""
+    visual3: str = ""
+    visual4: str = ""
+    visual5: str = ""
+    visual6: str = ""
+    visual7: str = ""
+    visual8: str = ""
+    visual9: str = ""
+    visual10: str = ""
 
 
 OUTPUT_SCHEMA = {
@@ -232,9 +246,9 @@ def _render_system_context(state: GraphState) -> str:
     if a.market_trends_md:
         parts += ["### market_trends", a.market_trends_md]
     if a.lss_json:
-        parts += ["### lss_selected", json.dumps(a.lss_json)]
+        parts += ["### lss_selected", json.dumps(a.lss_json, ensure_ascii=False)]
     if a.moka_json:
-        parts += ["### moka_selected", json.dumps(a.moka_json)]
+        parts += ["### moka_selected", json.dumps(a.moka_json, ensure_ascii=False)]
     return "\n\n".join(parts).strip()
 
 
@@ -245,6 +259,7 @@ def _get_runtime_ids(config: Optional[RunnableConfig]) -> Dict[str, str]:
     return {
         "thread_id": str(cfg.get("thread_id") or ""),
         "run_id": str(cfg.get("run_id") or ""),
+        "assistant_id": str(cfg.get("assistant_id") or ""),  # may be empty; we fallback
     }
 
 
@@ -308,6 +323,14 @@ def _make_llm(model: str) -> ChatOpenAI:
     )
 
 
+def _pick_step_model(state: GraphState, team: TeamName) -> str:
+    if isinstance(state.models, dict):
+        m = state.models.get(str(team))
+        if isinstance(m, str) and m.strip():
+            return m.strip()
+    return state.default_model
+
+
 def _call_llm(state: GraphState, team_system_prompt: str, team: TeamName, model_name: str) -> Dict[str, Any]:
     llm = _make_llm(model_name)
     payload = {
@@ -315,14 +338,14 @@ def _call_llm(state: GraphState, team_system_prompt: str, team: TeamName, model_
         "team": team,
         "persona": state.persona,
         "extra_input": state.extra_input,
-        "previous": {},  # keep tiny; prompts can still rely on persona + context
+        "previous": state.step_outputs,  # keep continuity for chained steps
         "output_template_version": state.output_template_version,
     }
     resp = llm.invoke(
         [
             {"role": "system", "content": _render_system_context(state)},
             {"role": "system", "content": team_system_prompt},
-            {"role": "user", "content": json.dumps(payload)},
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
         ]
     )
     content = resp.content if hasattr(resp, "content") else str(resp)
@@ -356,57 +379,68 @@ def _wrap_if_needed(
     }
 
 
-def _pick_step_model(state: GraphState, team: TeamName) -> str:
-    if isinstance(state.models, dict):
-        m = state.models.get(str(team))
-        if isinstance(m, str) and m.strip():
-            return m.strip()
-    return state.model
+def _track_best_model(state: GraphState, model_name: str) -> None:
+    if not state._best_model or _model_rank(model_name) > _model_rank(state._best_model):
+        state._best_model = model_name
 
 
 def _merge_interview(out: Dict[str, Any], state: GraphState) -> None:
+    # accept Q1..Q10 and/or q1..q10, and A1..A10 and/or a1..a10
     for i in range(1, 11):
-        kq = f"Q{i}"
-        if kq in out and isinstance(out[kq], str):
-            setattr(state, kq, out[kq])
-        ka = f"A{i}"
-        if ka in out and isinstance(out[ka], str):
-            setattr(state, ka, out[ka])
+        for key in (f"Q{i}", f"q{i}"):
+            v = out.get(key)
+            if isinstance(v, str):
+                setattr(state, f"q{i}", v)
+                break
+        for key in (f"A{i}", f"a{i}"):
+            v = out.get(key)
+            if isinstance(v, str):
+                setattr(state, f"a{i}", v)
+                break
 
 
 def _merge_jtbd(out: Dict[str, Any], state: GraphState) -> None:
     for i in range(1, 11):
-        kj = f"job{i}"
-        if kj in out and isinstance(out[kj], str):
-            setattr(state, kj, out[kj])
-        kp = f"pain{i}"
-        if kp in out and isinstance(out[kp], str):
-            setattr(state, kp, out[kp])
-        kg = f"gain{i}"
-        if kg in out and isinstance(out[kg], str):
-            setattr(state, kg, out[kg])
+        v = out.get(f"job{i}")
+        if isinstance(v, str):
+            setattr(state, f"job{i}", v)
+        v = out.get(f"pain{i}")
+        if isinstance(v, str):
+            setattr(state, f"pain{i}", v)
+        v = out.get(f"gain{i}")
+        if isinstance(v, str):
+            setattr(state, f"gain{i}", v)
 
 
 def _merge_features(out: Dict[str, Any], state: GraphState) -> None:
     for i in range(1, 11):
-        k = f"feature{i}"
-        if k in out and isinstance(out[k], str):
-            setattr(state, k, out[k])
+        v = out.get(f"feature{i}")
+        if isinstance(v, str):
+            setattr(state, f"feature{i}", v)
 
 
 def _merge_journey(out: Dict[str, Any], state: GraphState) -> None:
-    # expects: title, journey, step1..step10
-    if "title" in out and isinstance(out["title"], str):
-        state.title = out["title"]
-    if "journey" in out and isinstance(out["journey"], str):
-        state.journey = out["journey"]
+    v = out.get("title")
+    if isinstance(v, str):
+        state.title = v
+    v = out.get("journey")
+    if isinstance(v, str):
+        state.journey = v
     for i in range(1, 11):
-        k = f"step{i}"
-        if k in out and isinstance(out[k], str):
-            setattr(state, k, out[k])
+        v = out.get(f"step{i}")
+        if isinstance(v, str):
+            setattr(state, f"step{i}", v)
 
 
-def _apply_step(team: TeamName, state: GraphState, config: Optional[RunnableConfig]) -> str:
+def _merge_sketches(out: Dict[str, Any], state: GraphState) -> None:
+    # accept visual1..visual10 (lowercase)
+    for i in range(1, 11):
+        v = out.get(f"visual{i}")
+        if isinstance(v, str):
+            setattr(state, f"visual{i}", v)
+
+
+def _apply_step(team: TeamName, state: GraphState, config: Optional[RunnableConfig]) -> None:
     prompt_name = f"brandpilot_innovation_{team}"
     team_system_prompt, hub_meta = _get_prompt_text(prompt_name)
 
@@ -415,7 +449,13 @@ def _apply_step(team: TeamName, state: GraphState, config: Optional[RunnableConf
     raw = _call_llm(state, team_system_prompt, team, model_name)
     wrapped = _wrap_if_needed(state, team, raw, prompt_name, hub_meta, model_name)
     wrapped = _validate_output(wrapped)
-    output = wrapped.get("output", {}) if isinstance(wrapped.get("output"), dict) else {}
+
+    output = wrapped.get("output", {})
+    if not isinstance(output, dict):
+        output = {}
+
+    # save raw step output for chaining
+    state.step_outputs[str(team)] = output
 
     if team == "interview":
         _merge_interview(output, state)
@@ -425,12 +465,10 @@ def _apply_step(team: TeamName, state: GraphState, config: Optional[RunnableConf
         _merge_features(output, state)
     elif team in ("current", "ideal"):
         _merge_journey(output, state)
+    elif team == "sketches":
+        _merge_sketches(output, state)
 
-    # track most advanced model used
-    if _model_rank(model_name) > _model_rank(state.model_used):
-        state.model_used = model_name
-
-    return model_name
+    _track_best_model(state, model_name)
 
 
 def _finalize_state(state: GraphState, config: Optional[RunnableConfig]) -> None:
@@ -438,11 +476,21 @@ def _finalize_state(state: GraphState, config: Optional[RunnableConfig]) -> None
     state.thread_id = ids.get("thread_id", "")
     state.run_id = ids.get("run_id", "")
 
-    if not state.started_at:
-        # keep Brussels time
-        state.started_at = _tz_now_iso(BRUSSELS_TZ)
+    # assistant id (team output)
+    assistant_id = ids.get("assistant_id", "").strip()
+    if assistant_id:
+        state._assistant_id = assistant_id
+    state.team = state._assistant_id
 
-    # end time in Brussels
+    # persona_id + datum
+    if isinstance(state.persona, dict):
+        state.persona_id = str(state.persona.get("id") or state.persona_id or "")
+        d = state.persona.get("datum") or state.persona.get("date") or ""
+        state.datum = str(d) if d is not None else state.datum
+
+    # timestamps in Brussels
+    if not state.started_at:
+        state.started_at = _tz_now_iso(BRUSSELS_TZ)
     if not state.ended_at:
         state.ended_at = _tz_now_iso(BRUSSELS_TZ)
 
@@ -456,27 +504,18 @@ def _finalize_state(state: GraphState, config: Optional[RunnableConfig]) -> None
 
     state.status = "completed"
 
-    if not state.persona_id and isinstance(state.persona, dict):
-        state.persona_id = str(state.persona.get("id") or "")
-
-    if not state.datum and isinstance(state.persona, dict):
-        # accept "datum" or "date" if present
-        d = state.persona.get("datum") or state.persona.get("date") or ""
-        state.datum = str(d) if d is not None else ""
+    # model (most advanced used)
+    state.model = state._best_model or state.default_model
 
 
 def run_graph(state_in: Any, config: Optional[RunnableConfig] = None) -> Dict[str, Any]:
     state = _as_state(state_in)
 
-    # assistant id is not inside input; take what we can from config, else keep current default
-    # (you can pass "team" at input time if you want; it is excluded from output anyway)
-    state.team = "brandpilot_innovation"
-
-    # started_at at first entry
+    # start time immediately
     if not state.started_at:
         state.started_at = _tz_now_iso(BRUSSELS_TZ)
 
-    steps: List[TeamName] = []
+    steps: List[TeamName]
     if state.recipe and len(state.recipe) > 0:
         steps = list(state.recipe)
     else:
@@ -484,29 +523,15 @@ def run_graph(state_in: Any, config: Optional[RunnableConfig] = None) -> Dict[st
             raise ValueError("Missing 'recipe' and missing 'step'")
         steps = [state.step]
 
-    # run in given order; for journey fields, prefer ideal if present
-    seen_current = False
-    seen_ideal = False
-
+    # run in the user-provided order
     for t in steps:
         _apply_step(t, state, config=config)
-        if t == "current":
-            seen_current = True
-        if t == "ideal":
-            seen_ideal = True
-
-    # if recipe has both, keep ideal values (already last-write-wins, but lock it in)
-    # if recipe ends with current, but ideal was earlier, we still want ideal => rerun merge order
-    if seen_current and seen_ideal:
-        # simplest: rerun ideal once more without extra calls is not possible
-        # so enforce: if ideal was present but current overwrote it later, keep what you want by ordering recipe properly
-        pass
 
     state.ended_at = _tz_now_iso(BRUSSELS_TZ)
     _finalize_state(state, config=config)
 
-    # return only fields that are not excluded by pydantic (persona/assets/recipe/step/models/model/etc.)
-    return state.model_dump()
+    # return only the required output fields (order preserved by model field order)
+    return state.model_dump(exclude_none=False)
 
 
 builder = StateGraph(GraphState)
