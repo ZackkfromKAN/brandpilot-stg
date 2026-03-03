@@ -4,15 +4,15 @@ from __future__ import annotations
 import json
 import os
 import re
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from dotenv import load_dotenv
 from jsonschema import Draft202012Validator
 from langchain_openai import ChatOpenAI
+from langchain_core.runnables import RunnableConfig
 from langgraph.graph import StateGraph, START, END
 from pydantic import BaseModel, Field
-from datetime import datetime, timezone
-from langchain_core.runnables import RunnableConfig
 
 load_dotenv()
 
@@ -74,6 +74,10 @@ OUTPUT_SCHEMA = {
 VALIDATOR = Draft202012Validator(OUTPUT_SCHEMA)
 
 
+def _iso_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 def _as_state(x: Any) -> GraphState:
     if isinstance(x, GraphState):
         return x
@@ -86,7 +90,7 @@ def _as_state(x: Any) -> GraphState:
 
 def _render_system_context(state: GraphState) -> str:
     a = state.assets
-    parts = [
+    parts: List[str] = [
         f"brand={state.brand}",
         "### brand_manual_snippet",
         a.brand_manual_snippet_md or "",
@@ -100,38 +104,43 @@ def _render_system_context(state: GraphState) -> str:
     if a.market_trends_md:
         parts += ["### market_trends", a.market_trends_md]
     if a.lss_json:
-        parts += ["### lss_selected", json.dumps(a.lss_json, ensure_ascii=False)]
+        parts += ["### lss_selected", json.dumps(a.lss_json)]
     if a.moka_json:
-        parts += ["### moka_selected", json.dumps(a.moka_json, ensure_ascii=False)]
+        parts += ["### moka_selected", json.dumps(a.moka_json)]
     return "\n\n".join(parts).strip()
 
-def _iso_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 def _get_runtime_ids(config: Optional[RunnableConfig]) -> Dict[str, Optional[str]]:
-    cfg = (config or {}).get("configurable", {}) if isinstance(config, dict) else {}
+    # RunnableConfig is dict-like in practice
+    cfg: Dict[str, Any] = {}
+    if isinstance(config, dict):
+        cfg = (config.get("configurable") or {}) if isinstance(config.get("configurable"), dict) else {}
     return {
         "thread_id": cfg.get("thread_id"),
         "run_id": cfg.get("run_id"),
         "user_id": cfg.get("user_id") or cfg.get("langgraph_auth_user_id"),
     }
 
-def _build_compact_response(state: GraphState, team: str, model_used: str, config: Optional[RunnableConfig]) -> Dict[str, Any]:
+
+def _build_compact_response(
+    state: GraphState,
+    team: str,
+    model_used: str,
+    config: Optional[RunnableConfig],
+    status: str = "completed",
+) -> Dict[str, Any]:
     ids = _get_runtime_ids(config)
     persona_id = None
-    try:
-        persona_id = (state.persona or {}).get("id")
-    except Exception:
-        persona_id = None
+    if isinstance(state.persona, dict):
+        persona_id = state.persona.get("id")
 
-    # Only the step outputs; no persona/brand/assets echo
     outputs = dict(state.step_outputs or {})
 
     return {
         "persona_id": persona_id,
         "thread_id": ids.get("thread_id"),
         "run_id": ids.get("run_id"),
-        "status": "completed",  # run failed => server will still show error
+        "status": status,
         "team": team,
         "model": model_used,
         "started_at": state.started_at,
@@ -142,19 +151,16 @@ def _build_compact_response(state: GraphState, team: str, model_used: str, confi
 
 
 def _extract_hub_system_template(pulled_prompt: Any) -> str:
-    # Hub can return: str, ChatPromptTemplate, PromptTemplate, etc.
     if isinstance(pulled_prompt, str):
         return pulled_prompt
 
     # ChatPromptTemplate case
-    if hasattr(pulled_prompt, "messages") and pulled_prompt.messages:
+    if hasattr(pulled_prompt, "messages") and getattr(pulled_prompt, "messages"):
         m0 = pulled_prompt.messages[0]
-        # SystemMessagePromptTemplate typically has .prompt.template
         if hasattr(m0, "prompt") and hasattr(m0.prompt, "template"):
             t = m0.prompt.template
             if isinstance(t, str):
                 return t
-        # fallback: stringify the first message template
         return str(m0)
 
     # PromptTemplate-like
@@ -165,18 +171,14 @@ def _extract_hub_system_template(pulled_prompt: Any) -> str:
 
 
 def _get_prompt_text(prompt_name: str) -> Tuple[str, Dict[str, Any]]:
-    """
-    Returns (system_prompt_text, meta)
-    - No .format / no format_messages is called here.
-    - No 'revision' arg (API differs per langsmith version).
-    """
     from langsmith import Client
 
     client = Client()
     meta: Dict[str, Any] = {"prompt_name": prompt_name}
 
     try:
-        p = client.pull_prompt(prompt_name, include_model=False)
+        # Different langsmith versions accept different kwargs; keep it minimal.
+        p = client.pull_prompt(prompt_name)
         meta["hub_type"] = p.__class__.__name__
         return _extract_hub_system_template(p), meta
     except Exception as e:
@@ -198,14 +200,10 @@ def _best_effort_json_parse(text: str) -> Dict[str, Any]:
     except Exception:
         pass
 
-    # Try to grab first JSON object in the text
     m = re.search(r"\{.*\}", text, flags=re.DOTALL)
     if m:
         candidate = m.group(0)
-        try:
-            return json.loads(candidate)
-        except Exception:
-            pass
+        return json.loads(candidate)
 
     raise ValueError(f"Non-JSON model output:\n{text[:2000]}")
 
@@ -219,8 +217,8 @@ def _validate_output(obj: Dict[str, Any]) -> RunOutput:
 
 
 def _make_llm(model: str) -> ChatOpenAI:
-    # Keep deterministic for tests
-    # response_format json_object works for many OpenAI chat models; if unsupported it is ignored by some stacks.
+    # Deterministic
+    # Many OpenAI chat models accept this; if not, upstream may ignore it.
     return ChatOpenAI(
         model=model,
         temperature=0,
@@ -244,7 +242,7 @@ def _call_llm(state: GraphState, team_system_prompt: str, team: TeamName) -> Dic
         [
             {"role": "system", "content": _render_system_context(state)},
             {"role": "system", "content": team_system_prompt},
-            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+            {"role": "user", "content": json.dumps(payload)},
         ]
     )
 
@@ -252,17 +250,22 @@ def _call_llm(state: GraphState, team_system_prompt: str, team: TeamName) -> Dic
     return _best_effort_json_parse(content)
 
 
-def _run_team_step(state: Any, team: TeamName, config: Optional[RunnableConfig] = None) -> Dict[str, Any]:
+def _run_team_step(state_in: Any, team: TeamName, config: Optional[RunnableConfig] = None) -> Dict[str, Any]:
     state = _as_state(state_in)
 
     prompt_name = f"brandpilot_innovation_{team}"
     team_system_prompt, hub_meta = _get_prompt_text(prompt_name)
 
+    # Start time: set once, keep it through recipe
+    started_at = state.started_at or _iso_now()
+
     raw = _call_llm(state, team_system_prompt, team)
 
-    persona_id = str(state.persona.get("id", ""))
+    persona_id = ""
+    if isinstance(state.persona, dict):
+        persona_id = str(state.persona.get("id", ""))
 
-    # If hub prompt returns only the inner object, wrap it.
+    # Hub prompt returns inner object => wrap it
     if "template_version" not in raw:
         raw = {
             "template_version": state.output_template_version,
@@ -279,11 +282,9 @@ def _run_team_step(state: Any, team: TeamName, config: Optional[RunnableConfig] 
 
     out = _validate_output(raw)
 
-    # timing
-    started_at = state.started_at or _iso_now()
     ended_at = _iso_now()
 
-    # duration
+    duration_s: Optional[float]
     try:
         t0 = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
         t1 = datetime.fromisoformat(ended_at.replace("Z", "+00:00"))
@@ -291,15 +292,25 @@ def _run_team_step(state: Any, team: TeamName, config: Optional[RunnableConfig] 
     except Exception:
         duration_s = None
 
-    step_outputs = dict(state.step_outputs)
+    step_outputs = dict(state.step_outputs or {})
     step_outputs[team] = out.output
 
-    # Build compact payload for n8n
+    merged_state = GraphState(
+        **{
+            **state.model_dump(),
+            "step_outputs": step_outputs,
+            "started_at": started_at,
+            "ended_at": ended_at,
+            "duration_s": duration_s,
+        }
+    )
+
     compact = _build_compact_response(
-        GraphState(**{**state.model_dump(), "step_outputs": step_outputs, "started_at": started_at, "ended_at": ended_at, "duration_s": duration_s}),
+        merged_state,
         team=str(team),
         model_used=state.model,
         config=config,
+        status="completed",
     )
 
     return {
@@ -311,18 +322,21 @@ def _run_team_step(state: Any, team: TeamName, config: Optional[RunnableConfig] 
         "response": compact,
     }
 
-def run_single(state: Any, config: RunnableConfig) -> Dict[str, Any]:
+
+def run_single(state: Any, config: Optional[RunnableConfig] = None) -> Dict[str, Any]:
     s = _as_state(state)
     return _run_team_step(s, s.team, config=config)
 
 
-def run_recipe(state: Any, config: RunnableConfig) -> Dict[str, Any]:
+def run_recipe(state: Any, config: Optional[RunnableConfig] = None) -> Dict[str, Any]:
     s = _as_state(state)
     updates: Dict[str, Any] = {}
+
     for t in (s.recipe or []):
         merged = s.model_dump()
         merged.update(updates)
         updates = _run_team_step(merged, t, config=config)
+
     return updates
 
 
