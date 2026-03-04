@@ -5,7 +5,7 @@ import json
 import os
 import re
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 from dotenv import load_dotenv
 from jsonschema import Draft202012Validator
@@ -51,6 +51,51 @@ def _model_rank(name: str) -> int:
     return 0
 
 
+def _normalize_existing_features(
+    x: Optional[Union[str, List[Any]]]
+) -> Tuple[str, List[str]]:
+    """
+    Accept:
+      - None
+      - string
+      - array (strings or mixed values)
+    Return:
+      - joined string (newline-separated, good for LLM)
+      - normalized list[str] (kept for potential later use)
+    """
+    if x is None:
+        return "", []
+
+    if isinstance(x, str):
+        s = x.strip()
+        if not s:
+            return "", []
+        # If someone accidentally passed JSON array as a string, try to parse it.
+        if s.startswith("[") and s.endswith("]"):
+            try:
+                parsed = json.loads(s)
+                if isinstance(parsed, list):
+                    items = [str(v).strip() for v in parsed if str(v).strip()]
+                    return ("\n".join(items), items)
+            except Exception:
+                pass
+        return (s, [s])
+
+    if isinstance(x, list):
+        items = []
+        for v in x:
+            if v is None:
+                continue
+            sv = str(v).strip()
+            if sv:
+                items.append(sv)
+        return ("\n".join(items), items)
+
+    # Fallback: force string
+    s = str(x).strip()
+    return (s, [s] if s else [])
+
+
 class Assets(BaseModel):
     brand_manual_full_md: Optional[str] = None
     brand_manual_snippet_md: Optional[str] = None
@@ -79,7 +124,8 @@ class RunInput(BaseModel):
     model: Optional[str] = Field(default=None, exclude=True)
 
     # new: allow caller to pass a growing list of already-known ideas/features
-    existing_features: Optional[str] = Field(default=None, exclude=True)
+    # can be string or array
+    existing_features: Optional[Union[str, List[Any]]] = Field(default=None, exclude=True)
 
     extra_input: Optional[str] = Field(default=None, exclude=True)
     output_template_version: str = Field(default="v1", exclude=True)
@@ -342,15 +388,21 @@ def _pick_step_model(state: GraphState, team: TeamName) -> str:
 
 def _call_llm(state: GraphState, team_system_prompt: str, team: TeamName, model_name: str) -> Dict[str, Any]:
     llm = _make_llm(model_name)
+
+    existing_str, existing_list = _normalize_existing_features(state.existing_features)
+
     payload = {
         "brand": state.brand,
         "team": team,
         "persona": state.persona,
         "extra_input": state.extra_input,
-        "existing_features": state.existing_features or "",
+        # Keep both forms, so prompts can use what they want.
+        "existing_features": existing_str,
+        "existing_features_list": existing_list,
         "previous": state._step_outputs,  # continuity
         "output_template_version": state.output_template_version,
     }
+
     resp = llm.invoke(
         [
             {"role": "system", "content": _render_system_context(state)},
