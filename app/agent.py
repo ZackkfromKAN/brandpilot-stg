@@ -71,12 +71,21 @@ class RunInput(BaseModel):
     assets: Assets = Field(default_factory=Assets, exclude=True)
     recipe: Optional[List[TeamName]] = Field(default=None, exclude=True)
     step: Optional[TeamName] = Field(default=None, exclude=True)
-    models: Optional[Dict[str, str]] = Field(default=None, exclude=True)  # per-step override
+
+    # per-agent model override: {"interview":"gpt-4o-mini", ...}
+    models: Optional[Dict[str, str]] = Field(default=None, exclude=True)
+
+    # legacy: allow callers to send "model" like before
+    model: Optional[str] = Field(default=None, exclude=True)
+
+    # new: allow caller to pass a growing list of already-known ideas/features
+    existing_features: Optional[str] = Field(default=None, exclude=True)
+
     extra_input: Optional[str] = Field(default=None, exclude=True)
     output_template_version: str = Field(default="v1", exclude=True)
     prompt_tag: str = Field(default="active", exclude=True)
 
-    # default model for steps not in `models`
+    # fallback model when neither "models[team]" nor "model" is set
     default_model: str = Field(
         default_factory=lambda: os.getenv("OPENAI_MODEL", "gpt-5.2"),
         exclude=True,
@@ -99,7 +108,7 @@ class GraphState(RunInput):
     ended_at: str = ""
     duration_s: float = 0.0
     status: str = ""
-    team: str = ""  # assistant_id
+    team: str = ""   # assistant_id
     model: str = ""  # most advanced model used
     datum: str = ""
 
@@ -249,7 +258,6 @@ def _render_system_context(state: GraphState) -> str:
 
 
 def _get_runtime_ids(config: Optional[RunnableConfig]) -> Dict[str, str]:
-    # In LangGraph Cloud, thread/run IDs are usually in config["configurable"]
     cfg: Dict[str, Any] = {}
     if isinstance(config, dict):
         c = config.get("configurable")
@@ -327,6 +335,8 @@ def _pick_step_model(state: GraphState, team: TeamName) -> str:
         m = state.models.get(str(team))
         if isinstance(m, str) and m.strip():
             return m.strip()
+    if isinstance(state.model, str) and state.model.strip():
+        return state.model.strip()
     return state.default_model
 
 
@@ -337,6 +347,7 @@ def _call_llm(state: GraphState, team_system_prompt: str, team: TeamName, model_
         "team": team,
         "persona": state.persona,
         "extra_input": state.extra_input,
+        "existing_features": state.existing_features or "",
         "previous": state._step_outputs,  # continuity
         "output_template_version": state.output_template_version,
     }
@@ -437,7 +448,7 @@ def _merge_sketches(out: Dict[str, Any], state: GraphState) -> None:
             setattr(state, f"visual{i}", v)
 
 
-def _apply_step(team: TeamName, state: GraphState) -> None:
+def _apply_team(team: TeamName, state: GraphState) -> None:
     prompt_name = f"brandpilot_innovation_{team}"
     team_system_prompt, hub_meta = _get_prompt_text(prompt_name)
 
@@ -495,7 +506,7 @@ def _finalize_state(state: GraphState, config: Optional[RunnableConfig]) -> None
         state.duration_s = float(state.duration_s or 0.0)
 
     state.status = "completed"
-    state.model = state._best_model or state.default_model
+    state.model = state._best_model or (state.model or state.default_model)
 
 
 def run_graph(state_in: Any, config: Optional[RunnableConfig] = None) -> Dict[str, Any]:
@@ -504,16 +515,16 @@ def run_graph(state_in: Any, config: Optional[RunnableConfig] = None) -> Dict[st
     if not state.started_at:
         state.started_at = _tz_now_iso(BRUSSELS_TZ)
 
-    steps: List[TeamName]
+    teams: List[TeamName]
     if state.recipe and len(state.recipe) > 0:
-        steps = list(state.recipe)
+        teams = list(state.recipe)
     else:
         if not state.step:
             raise ValueError("Missing 'recipe' and missing 'step'")
-        steps = [state.step]
+        teams = [state.step]
 
-    for t in steps:
-        _apply_step(t, state)
+    for t in teams:
+        _apply_team(t, state)
 
     state.ended_at = _tz_now_iso(BRUSSELS_TZ)
     _finalize_state(state, config=config)
