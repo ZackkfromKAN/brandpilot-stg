@@ -137,14 +137,63 @@ sugar-free/vegan/kosher options, impulse packaging. Interesting where gummies ar
 
 ---
 
-## Current Status (as of 2026-04-22)
+## Current Status (as of 2026-04-23)
 
 | Agent | Status | Notes |
 |---|---|---|
-| `CLRT0257__innovation` | Complete | Refactored from original `app/agent.py`. Loads live brand context from API if credentials provided. |
-| `CAND0000__prospect` | Stub | Registered in langgraph.json. Nodes not yet implemented. Next thing to build. |
+| `CLRT0257__innovation` | Complete | Loads live brand context from API. 6-team pipeline. |
+| `CAND0000__prospect` | **Live** | First successful end-to-end run: 12 queries → 55 candidates → 5 shortlisted in ~4.8min. |
 
-**Next step:** Implement `CAND0000__prospect` nodes — broad web research via Claude, enrich candidates, score, save to BrandPilot via chat sessions.
+### CAND0000__prospect graph
+
+```
+load_brand_context → search_plan → search → enrich → score
+  → [outreach_draft if want_outreach=True]
+  → save_to_backend → finalize
+```
+
+**Nodes:**
+- `load_brand_context` — fetches brand passport, manual, markets from BrandPilot API
+- `search_plan` — LLM generates 8-12 diverse B2B search queries + target profile
+- `search` — Tavily advanced search on all queries, dedup by domain, pool up to 60 candidates
+- `enrich` — LLM extracts structured company profiles + initial relevance filter from snippets;
+             then fetches homepages (Tavily extract → fallback requests) for up to 30 survivors
+- `score` — LLM scores all enriched candidates 0-100 with brand-specific rubric; rejects < 55;
+            returns ranked shortlist capped at `prospect_count`
+- `outreach_draft` — (conditional) LLM drafts personalised emails per shortlisted prospect
+- `save_to_backend` — POSTs full run result to BrandPilot `/chatsessions` endpoint
+- `finalize` — timestamps, duration, status, model tracking
+
+**Inputs:**
+- `brand: str` — brand name
+- `request_text: str` — what kind of prospects to find
+- `geography: str` — optional geographic scope
+- `prospect_count: int` — shortlist size (default 10, max 50)
+- `want_outreach: bool` — whether to draft outreach emails
+- `model: str` — optional LLM override
+- `cognito_token + account_id + brand_id` — for BrandPilot API access
+
+**LangSmith prompts needed (optional — fallback defaults built-in):**
+- `CAND0000__prospect__search_plan`
+- `CAND0000__prospect__enrich`
+- `CAND0000__prospect__score`
+- `CAND0000__prospect__outreach_draft`
+
+**Requires:** `TAVILY_API_KEY` in .env
+
+**Known design note:**
+- `brand_context`, `cognito_token`, `account_id`, `brand_id` in `core/state.py` use `Field(exclude=True)`.
+  This keeps them out of LangSmith trace payloads/checkpoints (intentional for security + size).
+  They persist fine across in-memory node transitions. If a checkpointer is ever added, these fields
+  would need to be re-injected from the original payload on checkpoint resume.
+
+**Next steps:**
+1. ~~Add `TAVILY_API_KEY` to deployment .env~~ (done)
+2. Create LangSmith Hub prompts for prompt-only iteration (CAND0000__prospect__search_plan, __enrich, __score, __outreach_draft)
+3. Run with `--outreach` flag to test email drafting
+4. Run with `--cognito-token` against CAND0000 staging brand for live API integration test
+5. Wire `generic__prospect` as the reusable version of this pattern
+6. Add tests
 
 ---
 

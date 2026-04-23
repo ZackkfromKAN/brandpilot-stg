@@ -118,6 +118,14 @@ class BrandPilotClient:
     def list_chat_sessions(self) -> list:
         return self._get(self._brand_path("/chatsessions"))
 
+    def save_prospect_run(self, payload: dict) -> dict:
+        """
+        Persist a prospect run result to BrandPilot via the chat sessions endpoint.
+        Payload is stored as-is under the session body. Non-fatal: callers should
+        catch BrandPilotError and treat storage failure as a warning, not a crash.
+        """
+        return self._post(self._brand_path("/chatsessions"), payload)
+
     # ── account reads ─────────────────────────────────────────────────────────
 
     def list_account_brands(self) -> list:

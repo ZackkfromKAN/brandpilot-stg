@@ -88,7 +88,22 @@ def _validate(obj: Dict[str, Any]) -> Dict[str, Any]:
     return obj
 
 
-def _pick_model(state: InnovationState, team: TeamName) -> str:
+def _pick_model(
+    state: InnovationState,
+    team: TeamName,
+    prompt_meta: Optional[Dict[str, Any]] = None,
+) -> str:
+    """
+    Model selection priority:
+    1. LangSmith Hub  — model attached to this team's prompt in the Hub UI  (highest)
+    2. Per-team map   — state.models[team] passed by the caller
+    3. Global model   — state.model passed by the caller
+    4. DEFAULT_MODEL  — env var fallback
+    """
+    if prompt_meta:
+        m = str(prompt_meta.get("model", "")).strip()
+        if m:
+            return m
     if isinstance(state.models, dict):
         m = state.models.get(str(team), "").strip()
         if m:
@@ -237,7 +252,9 @@ def apply_team_node(team: TeamName):
     def node(state: InnovationState, config: Optional[RunnableConfig] = None) -> InnovationState:
         prompt_name = f"CLRT0257__innovation__{team}"
         system_prompt, hub_meta = get_prompt(prompt_name, tag=state.prompt_tag)
-        model_name = _pick_model(state, team)
+        # Hub model/temperature take priority; fall through to per-team map, then state, then env
+        model_name  = _pick_model(state, team, hub_meta)
+        temperature = float(hub_meta.get("temperature", 0.0))
 
         feat_str, feat_list = _normalize_features(state.existing_features)
         payload = {
@@ -251,7 +268,7 @@ def apply_team_node(team: TeamName):
             "output_template_version":  state.output_template_version,
         }
 
-        llm = get_llm(model_name, temperature=0, json_mode=True)
+        llm = get_llm(model_name, temperature=temperature, json_mode=True)
         resp = llm.invoke([
             {"role": "system", "content": _render_system_context(state)},
             {"role": "system", "content": system_prompt},

@@ -1,5 +1,9 @@
-# env
+# env / secrets
 .env
+
+# run outputs (may contain prospect data)
+prospect_output*.json
+*_output.json
 
 # LangGraph dev/runtime artifacts
 .langgraph_api/
@@ -8,5 +12,10 @@
 # python
 __pycache__/
 *.pyc
+*.pyo
 .venv/
 venv/
+.pytest_cache/
+
+# macOS
+.DS_Store
