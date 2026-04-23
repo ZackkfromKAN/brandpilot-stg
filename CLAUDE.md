@@ -60,13 +60,18 @@ Registered in `langgraph.json`. Add new agents there when creating them.
 
 ## LangSmith Prompt Naming Convention
 
-`{PROJECT_CODE}__{agent}__{team}` tagged `active` in LangSmith Hub.
+Generic (reusable across all brands): `{agent}__{team}`
+Project-specific: `{PROJECT_CODE}__{agent}__{team}`
+
+Both tagged `active` in LangSmith Hub (fallback: `:latest` auto-used if `:active` not set).
 
 Examples:
-- `CLRT0257__innovation__interview`
+- `prospect__search_plan` — generic, shared by all brands
+- `prospect__enrich`
+- `prospect__score`
+- `prospect__outreach_draft`
+- `CLRT0257__innovation__interview` — project-specific
 - `CLRT0257__innovation__jtbd`
-- `CAND0000__prospect__search_plan`
-- `CAND0000__prospect__score`
 
 Prompts are fetched at runtime via `core/prompts.py`. Changing the `active` tag in LangSmith
 rolls out instantly without a redeploy.
@@ -137,6 +142,22 @@ sugar-free/vegan/kosher options, impulse packaging. Interesting where gummies ar
 
 ---
 
+## LangGraph Cloud Deployment
+
+- **Deployment UI:** https://eu.smith.langchain.com/o/253f2ca7-c817-4591-ad03-92f62cefdf5a/host/deployments/0b33aae5-d4ac-4ad5-a841-0ab3b6a82b9d
+- **Deployment ID:** `0b33aae5-d4ac-4ad5-a841-0ab3b6a82b9d`
+- **Workspace ID:** `253f2ca7-c817-4591-ad03-92f62cefdf5a`
+- **GitHub repo:** `ZackkfromKAN/brandpilot-stg` (branch: `main`)
+- **Region:** EU (`https://eu.api.smith.langchain.com`)
+- **LangSmith project:** `brandpilot`
+
+Env vars required on deployment:
+`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `TAVILY_API_KEY`, `LANGSMITH_API_KEY`,
+`LANGSMITH_TRACING=true`, `LANGSMITH_ENDPOINT=https://eu.api.smith.langchain.com`,
+`LANGSMITH_PROJECT=brandpilot`, `DEFAULT_MODEL=claude-sonnet-4-6`
+
+---
+
 ## Current Status (as of 2026-04-23)
 
 | Agent | Status | Notes |
@@ -173,11 +194,11 @@ load_brand_context → search_plan → search → enrich → score
 - `model: str` — optional LLM override
 - `cognito_token + account_id + brand_id` — for BrandPilot API access
 
-**LangSmith prompts needed (optional — fallback defaults built-in):**
-- `CAND0000__prospect__search_plan`
-- `CAND0000__prospect__enrich`
-- `CAND0000__prospect__score`
-- `CAND0000__prospect__outreach_draft`
+**LangSmith prompts (pushed — generic, reusable across all brands):**
+- `prospect__search_plan`
+- `prospect__enrich`
+- `prospect__score`
+- `prospect__outreach_draft`
 
 **Requires:** `TAVILY_API_KEY` in .env
 

@@ -1,8 +1,8 @@
 {
   "dependencies": ["."],
   "graphs": {
-    "CLRT0257__innovation":  "./projects/CLRT0257/innovation/agent.py:agent",
-    "CAND0000__prospect":    "./projects/CAND0000/prospect/agent.py:agent"
+    "CLRT0257__innovation":  "projects.CLRT0257.innovation.agent:agent",
+    "CAND0000__prospect":    "projects.CAND0000.prospect.agent:agent"
   },
   "env": "./.env"
 }
