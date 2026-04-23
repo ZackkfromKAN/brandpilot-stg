@@ -4,5 +4,9 @@
     "CLRT0257__innovation":  "projects.CLRT0257.innovation.agent:agent",
     "CAND0000__prospect":    "projects.CAND0000.prospect.agent:agent"
   },
+  "auth": {
+    "path": "./auth/handler.py:auth",
+    "disable_studio_auth": true
+  },
   "env": "./.env"
 }
