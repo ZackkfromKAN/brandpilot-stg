@@ -218,6 +218,71 @@ load_brand_context → search_plan → search → enrich → score
 
 ---
 
+## MCP Gateway (Client Access Layer)
+
+`gateway/` — FastAPI service that gives clients zero-friction Claude Desktop access.
+
+**Hosting:** Render (Frankfurt, `starter` plan) — deploy via `render.yaml` in repo root.
+**URL:** `https://brandpilot-mcp-gateway.onrender.com` (update `GATEWAY_URL` env var after first deploy, then redeploy).
+
+### What it does
+- Acts as an OAuth 2.0 Authorization Server for Claude Desktop (RFC 8414 + RFC 9728)
+- Delegates identity verification to Cognito Hosted UI (Google login)
+- Gates access on BrandPilot backend account membership (same 60 s cache as LangGraph auth)
+- Proxies tool calls to LangGraph Cloud — clients never see the LangGraph URL or API key
+
+### Client setup (one-time, ~2 min)
+Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+```json
+{
+  "mcpServers": {
+    "brandpilot": {
+      "type": "sse",
+      "url": "https://brandpilot-mcp-gateway.onrender.com/sse"
+    }
+  }
+}
+```
+First connection → browser opens → Google login → done. Token auto-refreshes.
+
+### Access management
+- Grant: add email to BrandPilot account in backend → access within 60 s
+- Revoke: remove email → blocked within 60 s
+
+### MCP tools exposed
+| Tool | Purpose |
+|---|---|
+| `get_my_brands` | Lists accounts/brands the user has access to — call first |
+| `run_prospect_research` | Runs the CAND0000__prospect agent (~5 min) |
+
+### Env vars required (set in Render dashboard)
+| Var | Value |
+|---|---|
+| `GATEWAY_URL` | `https://brandpilot-mcp-gateway.onrender.com` |
+| `COGNITO_DOMAIN_STG` | `https://brandpilot-stg-api-domain.auth.eu-central-1.amazoncognito.com` |
+| `COGNITO_CLIENT_ID` | From AWS Cognito app client |
+| `COGNITO_CLIENT_SECRET` | From AWS Cognito app client (blank for public clients) |
+| `BRANDPILOT_API_STG` | `https://brandpilot-stg.com/api` |
+| `BRANDPILOT_ACCOUNT_IDS` | `01KPTNF3WKJ2ASYZA4J6E2V8NS` (comma-sep for multi-account) |
+| `BRANDPILOT_ENV` | `staging` |
+| `LANGGRAPH_URL` | LangGraph Cloud app URL |
+| `LANGGRAPH_API_KEY` | LangSmith API key |
+
+### One-time Cognito config required
+Add redirect URI to your Cognito app client's allowed list:
+```
+https://brandpilot-mcp-gateway.onrender.com/oauth/callback
+```
+
+### Local development
+```bash
+cd /Users/ZACK/brandpilot
+pip install -r gateway/requirements.txt
+GATEWAY_URL=http://localhost:8000 COGNITO_CLIENT_ID=xxx ... uvicorn gateway.main:app --reload
+```
+
+---
+
 ## Key Design Preferences (from project owner)
 
 - Hybrid build: Claude Code for architecture/schemas/security, LangSmith Hub for all prompt text
