@@ -1,8 +1,7 @@
 {
   "dependencies": ["."],
   "graphs": {
-    "CLRT0257__innovation":  "projects.CLRT0257.innovation.agent:agent",
-    "CAND0000__prospect":    "projects.CAND0000.prospect.agent:agent"
+    "CLRT0257__innovation": "projects.CLRT0257.innovation.agent:agent"
   },
   "auth": {
     "path": "./auth/handler.py:auth",

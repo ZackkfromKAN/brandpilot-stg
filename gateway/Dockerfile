@@ -2,11 +2,12 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# Install gateway dependencies only — keeps the image small
+# Install gateway + core dependencies
 COPY gateway/requirements.txt ./gateway/requirements.txt
 RUN pip install --no-cache-dir -r gateway/requirements.txt
 
-# Copy gateway package
+# Copy packages — core/ is needed by gateway/tools.py
+COPY core/ ./core/
 COPY gateway/ ./gateway/
 
 EXPOSE 8000

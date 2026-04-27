@@ -2,14 +2,13 @@
 MCP over HTTP+SSE for the BrandPilot Gateway.
 
 Transport (MCP spec 2024-11-05):
-  1. Claude Desktop → GET /sse            establishes SSE stream
-  2. Server         → event: endpoint     tells client where to POST messages
-  3. Claude Desktop → POST /messages      sends JSON-RPC requests
-  4. Server         → event: message      sends JSON-RPC responses via SSE
+  1. Claude / Claude Desktop → GET /sse            establishes SSE stream
+  2. Server                  → event: endpoint     tells client where to POST messages
+  3. Claude / Claude Desktop → POST /messages      sends JSON-RPC requests
+  4. Server                  → event: message      sends JSON-RPC responses via SSE
 
-Tool calls that run the LangGraph agent (~5 min) are started as asyncio tasks
-so the POST /messages handler returns 202 immediately. The result arrives via
-the SSE stream when the agent completes.
+All BrandPilot tool calls are started as asyncio tasks so the POST /messages
+handler returns 202 immediately. Responses arrive via SSE when the tool completes.
 """
 from __future__ import annotations
 
@@ -19,7 +18,6 @@ import os
 import secrets
 from typing import Any
 
-import httpx
 from fastapi import HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 
@@ -27,14 +25,8 @@ from . import access, oauth
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-_LANGGRAPH_URL     = os.getenv(
-    "LANGGRAPH_URL",
-    "https://brandpilot-poc-e8d716ed009d5b75936cb979995338bb.eu.langgraph.app",
-)
-_LANGGRAPH_API_KEY = os.getenv("LANGGRAPH_API_KEY", "")
-_AGENT_ID          = "CAND0000__prospect"
-_BRANDPILOT_ENV    = os.getenv("BRANDPILOT_ENV", "staging")
-_GATEWAY_URL       = os.getenv("GATEWAY_URL", "http://localhost:8000")
+_BRANDPILOT_ENV = os.getenv("BRANDPILOT_ENV", "staging")
+_GATEWAY_URL    = os.getenv("GATEWAY_URL", "http://localhost:8000")
 
 # ── MCP session store ─────────────────────────────────────────────────────────
 # mcp_session_id → {"queue": asyncio.Queue, "access_token": str, "email": str}
@@ -48,9 +40,8 @@ _TOOLS = [
         "name": "get_my_brands",
         "description": (
             "Returns the BrandPilot accounts and brands this user has access to. "
-            "Always call this first to get the account_id and brand_id required "
-            "by run_prospect_research. If the user has access to multiple brands, "
-            "ask which one they want to work with before proceeding."
+            "Call this if you don't already have the account_id and brand_id. "
+            "Then call initialize_session to load brand context before doing any research."
         ),
         "inputSchema": {
             "type": "object",
@@ -59,52 +50,140 @@ _TOOLS = [
         },
     },
     {
-        "name": "run_prospect_research",
+        "name": "initialize_session",
         "description": (
-            "Run the BrandPilot B2B prospect research agent. "
-            "Searches the web, enriches company profiles, scores against the brand's "
-            "ideal customer profile, and returns a ranked shortlist of prospects. "
-            "Takes ~5 minutes. Optionally drafts personalised outreach emails."
+            "ALWAYS call this at the start of every conversation, before any research. "
+            "Loads brand context (passport, brand manual, markets), long-term memory "
+            "(previously discovered prospects and past search queries to avoid repetition), "
+            "and detailed research instructions specific to this brand. "
+            "Returns everything needed to conduct focused, non-repetitive research."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "account_id": {
                     "type": "string",
-                    "description": "Account ID — get from get_my_brands.",
+                    "description": "Account ID — from get_my_brands.",
                 },
                 "brand_id": {
                     "type": "string",
-                    "description": "Brand ID — get from get_my_brands.",
+                    "description": "Brand ID — from get_my_brands.",
                 },
-                "brand": {
+                "project_code": {
                     "type": "string",
-                    "description": "Brand name (e.g. 'Cand\\'art'). Optional if brand_id is provided.",
-                },
-                "request_text": {
-                    "type": "string",
-                    "description": "What kind of prospects to find (e.g. 'Find European distributors for our functional lollipops').",
-                },
-                "geography": {
-                    "type": "string",
-                    "description": "Optional geographic scope (e.g. 'BeNeLux', 'Western Europe', 'Global').",
-                },
-                "prospect_count": {
-                    "type": "integer",
-                    "description": "Max shortlisted prospects to return (default 10, max 50).",
-                    "default": 10,
-                },
-                "want_outreach": {
-                    "type": "boolean",
-                    "description": "If true, draft a personalised outreach email per prospect.",
-                    "default": False,
-                },
-                "model": {
-                    "type": "string",
-                    "description": "Optional LLM override (e.g. 'claude-opus-4-7'). Leave empty for default.",
+                    "description": (
+                        "Optional internal project code (e.g. 'CAND0000') "
+                        "for brand-specific instruction overrides in LangSmith Hub."
+                    ),
                 },
             },
-            "required": ["account_id", "brand_id", "request_text"],
+            "required": ["account_id", "brand_id"],
+        },
+    },
+    {
+        "name": "web_search",
+        "description": (
+            "Search the web for B2B prospects, market intelligence, or brand research. "
+            "Uses advanced web search with detailed snippets. "
+            "Run multiple focused queries rather than one broad query for best coverage. "
+            "Returns title, URL, content snippet, and relevance score per result."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Search query — be specific and targeted.",
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Max results to return (default 8, max 20).",
+                    "default": 8,
+                },
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "extract_pages",
+        "description": (
+            "Extract full text content from web pages (e.g. company homepages). "
+            "Use this to enrich prospect profiles after initial web_search results. "
+            "Pass up to 20 URLs at once. "
+            "Returns {url: content} for all successfully extracted pages."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "urls": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "URLs to extract content from (max 20).",
+                },
+            },
+            "required": ["urls"],
+        },
+    },
+    {
+        "name": "save_research_results",
+        "description": (
+            "Save completed research results to the BrandPilot backend. "
+            "Call this once you have a final shortlist of prospects or research output. "
+            "Also updates brand memory so future research avoids the same companies. "
+            "Results are stored as a chat session under the brand."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "account_id": {
+                    "type": "string",
+                    "description": "Account ID from initialize_session.",
+                },
+                "brand_id": {
+                    "type": "string",
+                    "description": "Brand ID from initialize_session.",
+                },
+                "results": {
+                    "type": "object",
+                    "description": (
+                        "Research output. Should include: "
+                        "prospects (list of scored companies with name, url, domain, score, "
+                        "score_rationale, why_strong_fit, outreach_angle), "
+                        "search_queries (list of queries used), "
+                        "candidates_found (int), geography (str), request_text (str)."
+                    ),
+                },
+            },
+            "required": ["account_id", "brand_id", "results"],
+        },
+    },
+    {
+        "name": "update_brand_memory",
+        "description": (
+            "Directly update specific fields in the brand's long-term memory. "
+            "Use for incremental updates such as marking domains as do-not-target. "
+            "For saving a full research run with prospects, prefer save_research_results."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "account_id": {
+                    "type": "string",
+                    "description": "Account ID from initialize_session.",
+                },
+                "brand_id": {
+                    "type": "string",
+                    "description": "Brand ID from initialize_session.",
+                },
+                "memory_updates": {
+                    "type": "object",
+                    "description": (
+                        "Key/value pairs to merge into brand memory. "
+                        "Pass 'do_not_target' as a list of domains to blacklist."
+                    ),
+                },
+            },
+            "required": ["account_id", "brand_id", "memory_updates"],
         },
     },
 ]
@@ -113,10 +192,7 @@ _TOOLS = [
 # ── SSE endpoint ──────────────────────────────────────────────────────────────
 
 async def sse_handler(request: Request, access_token: str) -> StreamingResponse:
-    """
-    Open an SSE stream for a Claude Desktop session.
-    Sends an `endpoint` event so the client knows where to POST messages.
-    """
+    """Open an SSE stream for a Claude session."""
     session = oauth.get_session(access_token)
     if not session:
         raise HTTPException(status_code=401, detail="Invalid session.")
@@ -155,10 +231,7 @@ async def sse_handler(request: Request, access_token: str) -> StreamingResponse:
 # ── Message endpoint ──────────────────────────────────────────────────────────
 
 async def message_handler(request: Request, mcp_session_id: str) -> Response:
-    """
-    Receive a JSON-RPC message from Claude Desktop.
-    Starts an async task to process it; response arrives via SSE.
-    """
+    """Receive a JSON-RPC message. Processes async; response arrives via SSE."""
     mcp_session = _mcp_sessions.get(mcp_session_id)
     if not mcp_session:
         raise HTTPException(status_code=404, detail="MCP session not found.")
@@ -184,12 +257,12 @@ async def _process(mcp_session: dict, method: str, rid: Any, body: dict) -> None
                 "result": {
                     "protocolVersion": "2024-11-05",
                     "capabilities":    {"tools": {}},
-                    "serverInfo":      {"name": "brandpilot", "version": "1.0.0"},
+                    "serverInfo":      {"name": "brandpilot", "version": "2.0.0"},
                 },
             }
 
         elif method in ("notifications/initialized", "notifications/cancelled"):
-            return  # no response needed for notifications
+            return
 
         elif method == "ping":
             response = {"jsonrpc": "2.0", "id": rid, "result": {}}
@@ -243,14 +316,45 @@ async def _dispatch_tool(
     access_token: str,
     email: str,
 ) -> str:
+    # get_my_brands only needs the access token, not a Cognito token
     if name == "get_my_brands":
         return await _tool_get_my_brands(access_token, email)
 
-    if name == "run_prospect_research":
-        return await _tool_run_prospect(arguments, access_token, email)
+    # All other tools need a valid Cognito token for BrandPilot API calls
+    try:
+        cognito_token = await oauth.get_cognito_token(access_token)
+    except HTTPException as exc:
+        return json.dumps({"error": f"Authentication error: {exc.detail}"})
 
-    return json.dumps({"error": f"Unknown tool: {name}"})
+    from .tools import BrandPilotToolExecutor
+    executor = BrandPilotToolExecutor(
+        cognito_token=cognito_token,
+        email=email,
+        environment=_BRANDPILOT_ENV,
+    )
 
+    method_map = {
+        "initialize_session":    executor.initialize_session,
+        "web_search":            executor.web_search,
+        "extract_pages":         executor.extract_pages,
+        "save_research_results": executor.save_research_results,
+        "update_brand_memory":   executor.update_brand_memory,
+    }
+
+    handler = method_map.get(name)
+    if handler is None:
+        return json.dumps({"error": f"Unknown tool: {name}"})
+
+    try:
+        result = await handler(**arguments)
+        return json.dumps(result, ensure_ascii=False, default=str)
+    except TypeError as exc:
+        return json.dumps({"error": f"Invalid tool arguments: {exc}"})
+    except Exception as exc:
+        return json.dumps({"error": str(exc)})
+
+
+# ── get_my_brands ─────────────────────────────────────────────────────────────
 
 async def _tool_get_my_brands(access_token: str, email: str) -> str:
     try:
@@ -268,141 +372,3 @@ async def _tool_get_my_brands(access_token: str, email: str) -> str:
         })
 
     return json.dumps({"email": email, "accounts": accounts}, ensure_ascii=False, indent=2)
-
-
-async def _tool_run_prospect(
-    arguments: dict,
-    access_token: str,
-    email: str,
-) -> str:
-    account_id     = arguments.get("account_id", "")
-    brand_id       = arguments.get("brand_id", "")
-    brand          = arguments.get("brand", "")
-    request_text   = arguments.get("request_text", "")
-    geography      = arguments.get("geography", "")
-    prospect_count = int(arguments.get("prospect_count", 10))
-    want_outreach  = bool(arguments.get("want_outreach", False))
-    model          = arguments.get("model", "")
-
-    if not account_id or not brand_id:
-        return json.dumps({
-            "error": "account_id and brand_id are required.",
-            "hint":  "Call get_my_brands first to discover your account and brand IDs.",
-        })
-    if not request_text:
-        return json.dumps({"error": "request_text is required."})
-
-    try:
-        cognito_token = await oauth.get_cognito_token(access_token)
-    except HTTPException as exc:
-        return json.dumps({"error": f"Authentication error: {exc.detail}"})
-
-    try:
-        result = await _run_langgraph(
-            cognito_token  = cognito_token,
-            account_id     = account_id,
-            brand_id       = brand_id,
-            brand          = brand,
-            request_text   = request_text,
-            geography      = geography,
-            prospect_count = prospect_count,
-            want_outreach  = want_outreach,
-            model          = model,
-        )
-    except Exception as exc:
-        return json.dumps({"error": f"Agent run failed: {exc}"})
-
-    shortlist = result.get("shortlist", [])
-    duration  = result.get("duration_s")
-
-    summary: dict = {
-        "status":       result.get("status", "unknown"),
-        "shortlisted":  len(shortlist),
-        "duration_min": round(duration / 60, 1) if duration else None,
-        "prospects":    shortlist,
-    }
-    if result.get("errors"):
-        summary["agent_errors"] = result["errors"]
-
-    return json.dumps(summary, ensure_ascii=False, indent=2)
-
-
-# ── LangGraph proxy ───────────────────────────────────────────────────────────
-
-async def _run_langgraph(
-    *,
-    cognito_token:  str,
-    account_id:     str,
-    brand_id:       str,
-    brand:          str,
-    request_text:   str,
-    geography:      str,
-    prospect_count: int,
-    want_outreach:  bool,
-    model:          str,
-) -> dict[str, Any]:
-    """
-    Create a LangGraph thread, start a streaming run, poll until terminal status,
-    and return the final state values dict.
-
-    Passes the user's Cognito token to the agent so it can call the BrandPilot
-    API with the user's own identity. LangGraph's custom auth handler
-    (auth/handler.py) also validates this token independently on every request.
-    """
-    async with httpx.AsyncClient(
-        base_url=_LANGGRAPH_URL,
-        headers={
-            "x-api-key":     _LANGGRAPH_API_KEY,
-            "Authorization": f"Bearer {cognito_token}",
-            "Content-Type":  "application/json",
-        },
-        timeout=660,  # agent runs take ~5 min; give extra headroom
-    ) as c:
-        # Create thread
-        tr = await c.post("/threads", json={})
-        tr.raise_for_status()
-        thread_id = tr.json()["thread_id"]
-
-        # Build agent input — includes BrandPilot credentials so the agent
-        # can call GET /brand_manual, GET /passport, POST /chatsessions, etc.
-        agent_input: dict[str, Any] = {
-            "brand":          brand,
-            "request_text":   request_text,
-            "geography":      geography,
-            "prospect_count": prospect_count,
-            "want_outreach":  want_outreach,
-            "cognito_token":  cognito_token,
-            "account_id":     account_id,
-            "brand_id":       brand_id,
-            "environment":    _BRANDPILOT_ENV,
-        }
-        if model:
-            agent_input["model"] = model
-
-        # Start run
-        rr = await c.post(
-            f"/threads/{thread_id}/runs",
-            json={
-                "assistant_id": _AGENT_ID,
-                "input":        agent_input,
-                "stream_mode":  "events",
-            },
-        )
-        rr.raise_for_status()
-        run_id = rr.json()["run_id"]
-
-        # Poll until terminal status
-        while True:
-            sr = await c.get(f"/threads/{thread_id}/runs/{run_id}")
-            sr.raise_for_status()
-            status = sr.json().get("status")
-            if status == "success":
-                break
-            if status in ("error", "timeout", "interrupted"):
-                raise RuntimeError(f"Agent run ended with status: {status!r}")
-            await asyncio.sleep(5)
-
-        # Fetch final state
-        state_r = await c.get(f"/threads/{thread_id}/state")
-        state_r.raise_for_status()
-        return state_r.json().get("values", {})

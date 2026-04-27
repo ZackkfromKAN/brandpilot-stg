@@ -10,26 +10,34 @@ services:
     envVars:
       # Public URL of this service — set after first deploy
       - key: GATEWAY_URL
-        value: https://brandpilot-mcp-gateway.onrender.com   # update with real URL
+        value: https://brandpilot-mcp-gateway.onrender.com
 
-      # Cognito — from your .env / AWS Cognito app client
+      # Cognito — from AWS Cognito app client (set in Render dashboard)
       - key: COGNITO_DOMAIN_STG
         value: https://brandpilot-stg-api-domain.auth.eu-central-1.amazoncognito.com
       - key: COGNITO_CLIENT_ID
-        sync: false   # set in Render dashboard
+        sync: false
       - key: COGNITO_CLIENT_SECRET
-        sync: false   # set in Render dashboard (leave blank for public clients)
+        sync: false
 
       # BrandPilot backend
       - key: BRANDPILOT_API_STG
         value: https://brandpilot-stg.com/api
       - key: BRANDPILOT_ACCOUNT_IDS
-        value: 01KPTNF3WKJ2ASYZA4J6E2V8NS   # comma-separate for multiple accounts
+        value: 01KPTNF3WKJ2ASYZA4J6E2V8NS
       - key: BRANDPILOT_ENV
         value: staging
 
-      # LangGraph Cloud — never shared with clients
-      - key: LANGGRAPH_URL
-        value: https://brandpilot-poc-e8d716ed009d5b75936cb979995338bb.eu.langgraph.app
-      - key: LANGGRAPH_API_KEY
-        sync: false   # set in Render dashboard
+      # Web search
+      - key: TAVILY_API_KEY
+        sync: false
+
+      # LangSmith — tracing for all MCP tool calls
+      - key: LANGSMITH_API_KEY
+        sync: false
+      - key: LANGSMITH_TRACING
+        value: "true"
+      - key: LANGSMITH_ENDPOINT
+        value: https://eu.api.smith.langchain.com
+      - key: LANGSMITH_PROJECT
+        value: brandpilot
